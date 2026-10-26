@@ -1,0 +1,28 @@
+{
+  "name": "nemotron-local-chatbot",
+  "version": "2.0.0",
+  "private": true,
+  "description": "A local multi-user NVIDIA Nemotron Omni chatbot with SQLite storage and multimodal image, audio, video and document understanding",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^13.0.3",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "multer": "^2.0.2",
+    "adm-zip": "^0.5.16",
+    "mammoth": "^1.10.0",
+    "pdfjs-dist": "^5.4.624",
+    "@napi-rs/canvas": "^0.1.80",
+    "sharp": "^0.34.3",
+    "xlsx": "^0.18.5",
+    "word-extractor": "^1.0.4"
+  }
+}
