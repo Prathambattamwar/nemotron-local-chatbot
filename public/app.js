@@ -33,6 +33,8 @@ let messages = [];
 let isSending = false;
 let selectedFiles = [];
 let toastTimer = null;
+let localOwnerKey = null;
+const activeObjectUrls = new Set();
 const MAX_FILES = 5;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_FILE_BYTES = 40 * 1024 * 1024;
@@ -153,7 +155,8 @@ function formatBytes(bytes) {
 }
 
 function attachmentElement(attachment) {
-  const url = attachment.url || attachment.preview_url;
+  let url = attachment.url || attachment.preview_url;
+  if (!url && attachment.blob instanceof Blob) { url = URL.createObjectURL(attachment.blob); activeObjectUrls.add(url); }
   const type = attachment.data_type || (
     String(attachment.mime_type || attachment.type || '').startsWith('image/') ? 'image' :
     String(attachment.mime_type || attachment.type || '').startsWith('audio/') ? 'audio' :
@@ -347,7 +350,7 @@ function renderConversationList() {
       event.stopPropagation();
       if (!window.confirm(`Delete “${conversation.title || 'New chat'}” and its messages? This cannot be undone.`)) return;
       try {
-        await api(`/api/conversations/${encodeURIComponent(conversation.id)}`, { method: 'DELETE' });
+        await LocalChatDB.deleteConversation(localOwnerKey, conversation.id);
         conversations = conversations.filter((item) => item.id !== conversation.id);
         if (currentConversationId === conversation.id) {
           currentConversationId = null;
@@ -365,6 +368,8 @@ function renderConversationList() {
 }
 
 function renderMessages(typing = false) {
+  for (const url of activeObjectUrls) URL.revokeObjectURL(url);
+  activeObjectUrls.clear();
   welcome.classList.toggle('hidden', messages.length > 0 || typing);
   messageList.classList.toggle('hidden', messages.length === 0 && !typing);
   messageList.replaceChildren();
@@ -415,8 +420,7 @@ function renderMessages(typing = false) {
 }
 
 async function refreshConversations() {
-  const data = await api('/api/conversations');
-  conversations = data.conversations || [];
+  conversations = await LocalChatDB.listConversations(localOwnerKey);
   renderConversationList();
 }
 
@@ -430,96 +434,99 @@ async function openConversation(id) {
   hideMobileSidebar();
   renderConversationList();
   try {
-    const data = await api(`/api/conversations/${encodeURIComponent(id)}/messages`);
-    currentConversationId = id;
-    messages = data.messages || [];
-    setCurrentTitle(data.conversation?.title || 'New conversation');
+    const conversation = await LocalChatDB.getConversation(localOwnerKey, id);
+    if (!conversation) throw new Error('Conversation not found on this device.');
+    messages = await LocalChatDB.listMessages(localOwnerKey, id);
+    setCurrentTitle(conversation.title || 'New conversation');
     renderMessages();
     messageInput.focus();
-  } catch (error) {
-    showToast(error.message, true);
-  }
+  } catch (error) { showToast(error.message, true); }
 }
 
 async function createConversation() {
   if (isSending) return showToast('Wait until the current response finishes.', true);
-  try {
-    const data = await api('/api/conversations', { method: 'POST', body: JSON.stringify({}) });
-    conversations.unshift(data.conversation);
-    currentConversationId = data.conversation.id;
-    messages = [];
-    setCurrentTitle('New conversation');
-    renderMessages();
-    renderConversationList();
-    hideMobileSidebar();
-    messageInput.value = '';
-    clearSelectedFiles();
-    updateComposer();
-    messageInput.focus();
-  } catch (error) { showToast(error.message, true); }
+  const conversation = await LocalChatDB.createConversation(localOwnerKey);
+  conversations.unshift(conversation);
+  currentConversationId = conversation.id;
+  messages = [];
+  setCurrentTitle('New conversation');
+  renderMessages();
+  renderConversationList();
+  hideMobileSidebar();
+  messageInput.value = '';
+  clearSelectedFiles();
+  updateComposer();
+  messageInput.focus();
 }
 
 async function sendMessage(rawText) {
   const text = String(rawText || '').trim();
   if ((!text && !selectedFiles.length) || isSending) return;
   if (!currentConversationId) {
-    try {
-      const data = await api('/api/conversations', { method: 'POST', body: JSON.stringify({}) });
-      conversations.unshift(data.conversation);
-      currentConversationId = data.conversation.id;
-      renderConversationList();
-    } catch (error) { showToast(error.message, true); return; }
+    const conversation = await LocalChatDB.createConversation(localOwnerKey);
+    conversations.unshift(conversation);
+    currentConversationId = conversation.id;
+    renderConversationList();
   }
   const targetConversationId = currentConversationId;
   const filesToSend = [...selectedFiles];
-  const pendingContent = text || `Uploading ${filesToSend.length} file${filesToSend.length === 1 ? '' : 's'}…`;
-  const temporaryAttachments = filesToSend.map(({ file, previewUrl }) => ({
-    original_name: file.name,
-    name: file.name,
-    mime_type: file.type || 'application/octet-stream',
-    data_type: file.type.startsWith('image/') ? 'image' : file.type.startsWith('audio/') ? 'audio' : file.type.startsWith('video/') ? 'video' : 'file',
-    size_bytes: file.size,
-    preview_url: previewUrl
-  }));
-
+  const timestamp = Math.floor(Date.now() / 1000);
+  const pendingContent = text || `Please analyze ${filesToSend.length} attached file${filesToSend.length === 1 ? '' : 's'}.`;
+  const userMessage = {
+    id: crypto.randomUUID(), role: 'user', content: pendingContent, created_at: timestamp, pending: true,
+    attachments: filesToSend.map(({ file }) => ({
+      id: crypto.randomUUID(), original_name: file.name, name: file.name,
+      mime_type: file.type || 'application/octet-stream',
+      data_type: file.type.startsWith('image/') ? 'image' : file.type.startsWith('audio/') ? 'audio' : file.type.startsWith('video/') ? 'video' : 'file',
+      size_bytes: file.size, blob: file, parsed: false
+    }))
+  };
   messageInput.value = '';
   selectedFiles = [];
   renderSelectedFiles();
   updateComposer();
   isSending = true;
   sendButton.disabled = true;
-  messages.push({ role: 'user', content: pendingContent, attachments: temporaryAttachments, created_at: Math.floor(Date.now() / 1000), pending: true });
+  messages.push(userMessage);
+  await LocalChatDB.putMessage(localOwnerKey, targetConversationId, userMessage);
+  const conv = await LocalChatDB.getConversation(localOwnerKey, targetConversationId);
+  if (conv && conv.title === 'New chat') {
+    conv.title = (text || filesToSend[0]?.file.name || 'Uploaded files').replace(/\s+/g, ' ').slice(0, 56);
+    await LocalChatDB.putConversation(localOwnerKey, conv);
+  }
   renderMessages(true);
 
   const formData = new FormData();
-  if (text) formData.append('message', text);
+  formData.append('message', text);
+  const history = messages.filter((m) => m.id !== userMessage.id).slice(-23).map((m) => ({ role: m.role, content: m.content }));
+  formData.append('history', JSON.stringify(history));
   for (const item of filesToSend) formData.append('attachments', item.file, item.file.name);
-
   try {
-    const data = await api(`/api/conversations/${encodeURIComponent(targetConversationId)}/messages`, {
-      method: 'POST', body: formData
-    });
-    if (targetConversationId === currentConversationId) {
-      const lastUser = [...messages].reverse().find((entry) => entry.role === 'user' && entry.pending);
-      if (lastUser) Object.assign(lastUser, data.userMessage || data.message, { pending: false });
-      if (!data.aiSkipped && data.message && data.message.role === 'assistant') messages.push(data.message);
-      renderMessages();
+    const data = await api('/api/generate', { method: 'POST', body: formData });
+    userMessage.pending = false;
+    if (data.aiSkipped) {
+      userMessage.status = 'retry';
+      userMessage.error = data.notice || 'AI service is temporarily busy. You can retry this message.';
+      await LocalChatDB.putMessage(localOwnerKey, targetConversationId, userMessage);
+      showToast(data.notice || 'AI service is temporarily busy. Your message remains saved on this device.', true);
+    } else {
+      await LocalChatDB.putMessage(localOwnerKey, targetConversationId, userMessage);
+      const assistantMessage = { id: crypto.randomUUID(), role: 'assistant', content: data.message.content, created_at: data.message.created_at || Math.floor(Date.now() / 1000), attachments: [] };
+      await LocalChatDB.putMessage(localOwnerKey, targetConversationId, assistantMessage);
+      if (targetConversationId === currentConversationId) messages.push(assistantMessage);
     }
-    if (data.aiSkipped) showToast(data.notice || 'Files saved to your local database.');
+    await LocalChatDB.touchConversation(localOwnerKey, targetConversationId);
     await refreshConversations();
-    const updated = conversations.find((conversation) => conversation.id === targetConversationId);
+    const updated = conversations.find((c) => c.id === targetConversationId);
     if (updated && targetConversationId === currentConversationId) setCurrentTitle(updated.title);
+    if (targetConversationId === currentConversationId) renderMessages();
   } catch (error) {
-    if (targetConversationId === currentConversationId) {
-      try {
-        const history = await api(`/api/conversations/${encodeURIComponent(targetConversationId)}/messages`);
-        messages = history.messages || [];
-        setCurrentTitle(history.conversation?.title || 'New conversation');
-        renderMessages();
-      } catch { renderMessages(); }
-    }
-    showToast(error.message, true);
-    try { await refreshConversations(); } catch { /* keep the active screen usable */ }
+    userMessage.pending = false;
+    userMessage.status = 'error';
+    userMessage.error = error.message;
+    await LocalChatDB.putMessage(localOwnerKey, targetConversationId, userMessage);
+    if (targetConversationId === currentConversationId) renderMessages();
+    showToast(`${error.message} Your message is still saved on this device.`, true);
   } finally {
     for (const item of filesToSend) URL.revokeObjectURL(item.previewUrl);
     isSending = false;
@@ -536,8 +543,40 @@ function updateComposer() {
   sendButton.disabled = isSending || (!messageInput.value.trim() && selectedFiles.length === 0);
 }
 
+async function migrateLegacyHistoryOnce() {
+  const marker = await LocalChatDB.getSetting(`legacy-import:${localOwnerKey}`);
+  if (marker?.value) return;
+  try {
+    const response = await api('/api/conversations');
+    for (const conversation of (response.conversations || [])) {
+      const existing = await LocalChatDB.getConversation(localOwnerKey, conversation.id);
+      if (!existing) await LocalChatDB.putConversation(localOwnerKey, { ...conversation, ownerKey: localOwnerKey });
+      const history = await api(`/api/conversations/${encodeURIComponent(conversation.id)}/messages`);
+      for (const source of (history.messages || [])) {
+        const attachments = [];
+        for (const attachment of (source.attachments || [])) {
+          let blob = null;
+          try { const fileResponse = await fetch(attachment.url, { credentials: 'same-origin' }); if (fileResponse.ok) blob = await fileResponse.blob(); } catch { /* keep metadata if file retrieval fails */ }
+          attachments.push({ ...attachment, blob: blob || undefined, url: undefined, preview_url: undefined });
+        }
+        const localMessage = { ...source, attachments, pending: false };
+        await LocalChatDB.putMessage(localOwnerKey, conversation.id, localMessage);
+      }
+    }
+    await LocalChatDB.putSetting(`legacy-import:${localOwnerKey}`, { completedAt: Date.now() });
+    showToast('Existing server history was imported to this device. Verify it before removing old server records.');
+  } catch (error) {
+    // Old server history may be unavailable. Local history remains usable.
+    console.info('Legacy history import skipped:', error.message);
+  }
+}
+
 async function initializeWorkspace(user) {
   currentUser = user;
+  localOwnerKey = `user:${String(user.username || 'user').toLowerCase()}`;
+  await LocalChatDB.open();
+  localStorage.setItem('nemotron-last-local-user', String(user.username || 'user'));
+  await migrateLegacyHistoryOnce();
   $('#sidebar-username').textContent = user.username;
   $('#avatar').textContent = user.username.slice(0, 1).toUpperCase();
   setAuthVisible(false);
@@ -573,7 +612,7 @@ $('#new-chat').addEventListener('click', createConversation);
 $('#logout-button').addEventListener('click', async () => {
   if (isSending) return showToast('Wait until the current response finishes before signing out.', true);
   try { await api('/api/logout', { method: 'POST', body: JSON.stringify({}) }); } catch { /* show sign-in screen even if the session already expired */ }
-  currentUser = null; conversations = []; currentConversationId = null; messages = [];
+  currentUser = null; localOwnerKey = null; conversations = []; currentConversationId = null; messages = [];
   clearSelectedFiles();
   setAuthMode('login'); setAuthVisible(true); hideMobileSidebar();
 });
@@ -610,7 +649,13 @@ document.addEventListener('keydown', (event) => {
     const data = await api('/api/me');
     await initializeWorkspace(data.user);
   } catch {
-    setAuthMode('login');
-    setAuthVisible(true);
+    const cachedUsername = localStorage.getItem('nemotron-last-local-user');
+    if (cachedUsername) {
+      await initializeWorkspace({ username: cachedUsername, offlineLocalOnly: true });
+      showToast('Offline mode: local history is available, but AI requests and sign-in require a connection.');
+    } else {
+      setAuthMode('login');
+      setAuthVisible(true);
+    }
   }
 })();

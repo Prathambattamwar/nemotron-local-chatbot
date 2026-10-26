@@ -1,0 +1,11 @@
+{
+  "name": "Nemotron Chat",
+  "short_name": "Nemotron",
+  "description": "Device-first multimodal AI chat",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#101116",
+  "theme_color": "#101116",
+  "icons": []
+}

@@ -461,12 +461,8 @@ app.get('/api/conversations', auth, (req, res) => {
   res.json({ conversations });
 });
 
-app.post('/api/conversations', auth, (req, res) => {
-  const timestamp = nowSeconds();
-  const conversation = { id: crypto.randomUUID(), title: 'New chat', created_at: timestamp, updated_at: timestamp };
-  db.prepare('INSERT INTO conversations (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
-    .run(conversation.id, req.user.id, conversation.title, timestamp, timestamp);
-  res.status(201).json({ conversation });
+app.post('/api/conversations', auth, (_req, res) => {
+  return sendError(res, 410, 'Conversation creation is now device-only. Update the PWA to the local-first version.');
 });
 
 app.get('/api/conversations/:id/messages', auth, (req, res) => {
@@ -478,20 +474,111 @@ app.get('/api/conversations/:id/messages', auth, (req, res) => {
   res.json({ conversation: { id: conversation.id, title: conversation.title }, messages });
 });
 
-app.patch('/api/conversations/:id', auth, (req, res) => {
-  const conversation = ownedConversation(req.params.id, req.user.id);
-  if (!conversation) return sendError(res, 404, 'Conversation not found.');
-  const title = cleanTitle(req.body?.title);
-  db.prepare('UPDATE conversations SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-    .run(title, nowSeconds(), conversation.id, req.user.id);
-  res.json({ id: conversation.id, title });
+app.patch('/api/conversations/:id', auth, (_req, res) => sendError(res, 410, 'Conversation edits are now device-only.'));
+
+
+app.delete('/api/conversations/:id', auth, (_req, res) => sendError(res, 410, 'Delete conversations from the PWA local history.'));
+
+
+
+// Stateless AI endpoint for device-only conversation history. The server receives only
+// the context needed for this request and never inserts the prompt, response, or files into SQLite.
+app.post('/api/generate', auth, upload.array('attachments', MAX_ATTACHMENT_FILES), async (req, res) => {
+  const typedMessage = String(req.body?.message || '').trim();
+  const files = Array.isArray(req.files) ? req.files : [];
+  if (!typedMessage && files.length === 0) return sendError(res, 400, 'Type a message or attach at least one file.');
+  if (typedMessage.length > MAX_MESSAGE_CHARS) return sendError(res, 413, `Messages must be ${MAX_MESSAGE_CHARS.toLocaleString()} characters or less.`);
+  const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+  if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) return sendError(res, 413, 'Attachments must total 40 MB or less per message.');
+  if (!process.env.NVIDIA_API_KEY || process.env.NVIDIA_API_KEY === 'put_your_nvidia_api_key_here') {
+    return sendError(res, 503, 'The NVIDIA API key is missing. Add NVIDIA_API_KEY to .env and restart the app. Your conversation remains saved on this device.');
+  }
+  let history = [];
+  try { history = JSON.parse(String(req.body?.history || '[]')); } catch { return sendError(res, 400, 'The conversation context was invalid.'); }
+  if (!Array.isArray(history)) return sendError(res, 400, 'The conversation context must be a message list.');
+  history = history.slice(-MAX_HISTORY_MESSAGES + 1).filter(m => m && ['user','assistant'].includes(m.role) && typeof m.content === 'string')
+    .map(m => ({ role: m.role, content: m.content.slice(0, MAX_MESSAGE_CHARS) }));
+
+  const currentText = typedMessage || 'Please analyze the attached file(s). Describe their contents and summarize the important details.';
+  const contentParts = [{ type: 'text', text: currentText }];
+  const notes = [];
+  for (const file of files) {
+    const originalName = safeOriginalName(file.originalname);
+    const mimeType = bestEffortMime({ ...file, originalname: originalName });
+    const dataType = classifyDataType(mimeType, originalName);
+    if (dataType === 'image') {
+      try {
+        const jpeg = await sharp(file.buffer, { animated: false, limitInputPixels: 40000000 }).rotate()
+          .resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 85 }).toBuffer();
+        contentParts.push({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}` } });
+      } catch { notes.push(`Image ${originalName} could not be decoded for analysis.`); }
+    } else if (dataType === 'audio') {
+      const ext = normalizedExtension(originalName);
+      const audioMime = ext === '.wav' ? 'audio/wav' : ext === '.mp3' ? 'audio/mpeg' : ext === '.flac' ? 'audio/flac' : null;
+      if (audioMime) contentParts.push({ type: 'audio_url', audio_url: { url: `data:${audioMime};base64,${file.buffer.toString('base64')}` } });
+      else notes.push(`${originalName}: direct audio analysis supports WAV, MP3, or FLAC.`);
+    } else if (dataType === 'video') {
+      if (normalizedExtension(originalName) === '.mp4' || mimeType === 'video/mp4') {
+        contentParts.push({ type: 'video_url', video_url: { url: `data:video/mp4;base64,${file.buffer.toString('base64')}` } });
+      } else notes.push(`${originalName}: direct video analysis requires MP4.`);
+    } else {
+      try {
+        const extracted = await extractAttachmentContent(file.buffer, originalName, mimeType);
+        if (extracted.text) contentParts[0].text += `\n\n[Extracted content from ${originalName}]\n${String(extracted.text).slice(0, MAX_EXTRACTED_FILE_CHARS)}`;
+        for (const part of (extracted.generatedParts || []).slice(0, 6)) {
+          if ((part.mime_type === 'image/jpeg' || part.mime_type === 'image/png') && part.data) {
+            contentParts.push({ type: 'image_url', image_url: { url: `data:${part.mime_type};base64,${Buffer.from(part.data).toString('base64')}` } });
+          }
+        }
+        if (!extracted.text && !(extracted.generatedParts || []).length) notes.push(`${originalName} was received but no readable content could be extracted.`);
+        if (extracted.note) notes.push(`${originalName}: ${String(extracted.note).slice(0, 300)}`);
+      } catch { notes.push(`${originalName}: document parsing failed.`); }
+    }
+  }
+  if (notes.length) contentParts[0].text += `\n\nFile processing notes:\n${notes.join('\n')}`;
+  const modelMessages = [...history, { role: 'user', content: contentParts.length > 1 ? contentParts : contentParts[0].text }];
+  const payload = {
+    model: NVIDIA_MODEL,
+    messages: [
+      { role: 'system', content: 'You are a helpful, accurate, friendly multimodal assistant. Answer the user directly, structure longer answers clearly, and use Markdown when useful. Analyze only the content actually supplied in this request.' },
+      ...modelMessages
+    ],
+    temperature: NVIDIA_TEMPERATURE, top_p: 0.95, max_tokens: NVIDIA_MAX_TOKENS, stream: false,
+    chat_template_kwargs: { enable_thinking: NVIDIA_ENABLE_THINKING }
+  };
+  if (modelMessages.some(m => Array.isArray(m.content) && m.content.some(part => part.type === 'video_url'))) {
+    payload.mm_processor_kwargs = { use_audio_in_video: true };
+    payload.media_io_kwargs = { video: { fps: 1.0, num_frames: -1 } };
+  }
+  try {
+    const response = await fetchNvidiaWithBackoff(`${NVIDIA_BASE_URL}/chat/completions`, {
+      method: 'POST', headers: { 'Authorization': `Bearer ${process.env.NVIDIA_API_KEY}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify(payload)
+    }, 3);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 429 || response.status === 503) {
+        return res.json({ aiSkipped: true, notice: 'The AI service is temporarily busy after automatic retries. Your message is still saved on this device; please try again shortly.' });
+      }
+      const publicMessage = response.status === 401 || response.status === 403
+        ? 'NVIDIA rejected the API key. Check NVIDIA_API_KEY and model access.'
+        : response.status === 413 || response.status === 415
+          ? 'NVIDIA rejected the media payload. Try fewer or smaller supported files.'
+          : `NVIDIA request failed (HTTP ${response.status}). Your message remains saved on this device.`;
+      return sendError(res, 502, publicMessage);
+    }
+    const answer = body?.choices?.[0]?.message?.content;
+    const answerText = typeof answer === 'string' ? answer : Array.isArray(answer) ? answer.map(p => typeof p === 'string' ? p : (p?.text || '')).join('\n').trim() : '';
+    if (!answerText) return sendError(res, 502, 'NVIDIA returned an empty answer. Your prompt remains saved on this device.');
+    return res.json({ message: { id: crypto.randomUUID(), role: 'assistant', content: answerText, created_at: nowSeconds() } });
+  } catch (error) {
+    if (error.name === 'TimeoutError' || error.name === 'AbortError') return sendError(res, 504, 'NVIDIA took too long to answer. Your message remains saved on this device; try again with fewer or smaller files.');
+    console.error('Stateless AI request failed:', error.message);
+    return sendError(res, 502, 'Could not reach NVIDIA. Your message remains saved on this device. Check the network and API settings.');
+  }
 });
 
-app.delete('/api/conversations/:id', auth, (req, res) => {
-  const result = db.prepare('DELETE FROM conversations WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
-  if (!result.changes) return sendError(res, 404, 'Conversation not found.');
-  res.json({ ok: true });
-});
+app.post('/api/conversations/:id/messages', auth, (_req, res) => sendError(res, 410, 'This endpoint is retired. Use the stateless /api/generate endpoint.'));
 
 app.post('/api/conversations/:id/messages', auth, upload.array('attachments', MAX_ATTACHMENT_FILES), async (req, res) => {
   const conversation = ownedConversation(req.params.id, req.user.id);

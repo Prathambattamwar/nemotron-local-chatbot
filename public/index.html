@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#101116">
   <title>Nemotron Chat — Local AI</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="manifest" href="/manifest.webmanifest">
 </head>
 <body>
   <div id="auth-screen" class="auth-screen hidden">
@@ -80,12 +81,14 @@
           <textarea id="message-input" rows="1" maxlength="16000" placeholder="Message Nemotron Omni…" aria-label="Your message"></textarea>
           <div class="composer-bottom"><span class="composer-hint"><kbd>Enter</kbd> to send <span class="hint-divider">·</span> <kbd>Shift + Enter</kbd> for new line</span><div class="composer-actions"><label for="file-input" class="attach-button" title="Attach images, audio, video, documents, or other files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.4 11.1 12.9 19.6a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg><span>Attach</span></label><input id="file-input" class="file-input" type="file" multiple accept="image/*,audio/*,video/*,application/pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.odt,.ods,.odp,.txt,.md,.csv,.tsv,.json,.jsonl,.xml,.html,.htm,.css,.js,.ts,.tsx,.py,.java,.cs,.cpp,.go,.rs,.sql,.yaml,.yml,.toml,.ini,.log,.ipynb,.zip,.7z,.rar,.tar,.gz" aria-label="Choose attachments"><span id="character-count" class="character-count">0 / 16,000</span><button id="send-button" class="send-button" type="submit" aria-label="Send message" title="Send message"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" /></svg></button></div></div>
         </form>
-        <p class="disclaimer">AI can make mistakes. Verify important information. <span>Files are stored in local SQLite; media is sent to NVIDIA when you ask the model to analyze it.</span></p>
+        <p class="disclaimer">AI can make mistakes. Verify important information. <span>Conversation history stays on this device. Selected files and prompt context are sent to the AI server when you request analysis.</span></p>
       </footer>
     </main>
     <div id="mobile-scrim" class="mobile-scrim"></div>
     <div id="toast" class="toast" role="status"></div>
   </div>
+  <script>if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));</script>
+  <script src="/db.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
 </html>
