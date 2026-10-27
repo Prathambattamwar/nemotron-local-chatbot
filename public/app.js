@@ -461,7 +461,7 @@ async function createConversation() {
 
 async function sendMessage(rawText) {
   const text = String(rawText || '').trim();
-  if ((!text && !selectedFiles.length) || isSending) return;
+  if (!text || isSending) return;
   if (!currentConversationId) {
     const conversation = await LocalChatDB.createConversation(localOwnerKey);
     conversations.unshift(conversation);
@@ -469,9 +469,9 @@ async function sendMessage(rawText) {
     renderConversationList();
   }
   const targetConversationId = currentConversationId;
-  const filesToSend = [...selectedFiles];
+  const filesToSend = []; // This build supports text-only AI conversations.
   const timestamp = Math.floor(Date.now() / 1000);
-  const pendingContent = text || `Please analyze ${filesToSend.length} attached file${filesToSend.length === 1 ? '' : 's'}.`;
+  const pendingContent = text;
   const userMessage = {
     id: crypto.randomUUID(), role: 'user', content: pendingContent, created_at: timestamp, pending: true,
     attachments: filesToSend.map(({ file }) => ({
@@ -496,13 +496,9 @@ async function sendMessage(rawText) {
   }
   renderMessages(true);
 
-  const formData = new FormData();
-  formData.append('message', text);
-  const history = messages.filter((m) => m.id !== userMessage.id).slice(-23).map((m) => ({ role: m.role, content: m.content }));
-  formData.append('history', JSON.stringify(history));
-  for (const item of filesToSend) formData.append('attachments', item.file, item.file.name);
+  const history = messages.filter((m) => m.id !== userMessage.id).slice(-23).map((m) => ({ role: m.role, content: String(m.content || '') }));
   try {
-    const data = await api('/api/generate', { method: 'POST', body: formData });
+    const data = await api('/api/generate', { method: 'POST', body: JSON.stringify({ message: text, history }) });
     userMessage.pending = false;
     if (data.aiSkipped) {
       userMessage.status = 'retry';
@@ -540,7 +536,7 @@ function updateComposer() {
   characterCount.textContent = `${length.toLocaleString()} / 16,000`;
   messageInput.style.height = 'auto';
   messageInput.style.height = `${Math.min(messageInput.scrollHeight, 230)}px`;
-  sendButton.disabled = isSending || (!messageInput.value.trim() && selectedFiles.length === 0);
+  sendButton.disabled = isSending || !messageInput.value.trim();
 }
 
 async function migrateLegacyHistoryOnce() {
@@ -573,13 +569,14 @@ async function migrateLegacyHistoryOnce() {
 
 async function initializeWorkspace(user) {
   currentUser = user;
-  localOwnerKey = `user:${String(user.username || 'user').toLowerCase()}`;
+  localOwnerKey = localStorage.getItem('nemotron-device-local-key-v1') ? `device:${localStorage.getItem('nemotron-device-local-key-v1')}` : 'device:guest';
   await LocalChatDB.open();
+  await LocalChatDB.getRetentionInfo();
   localStorage.setItem('nemotron-last-local-user', String(user.username || 'user'));
-  await migrateLegacyHistoryOnce();
   $('#sidebar-username').textContent = user.username;
   $('#avatar').textContent = user.username.slice(0, 1).toUpperCase();
-  setAuthVisible(false);
+  if (authScreen) authScreen.classList.add('hidden');
+  appShell.classList.remove('hidden');
   messages = [];
   currentConversationId = null;
   setCurrentTitle('New conversation');
@@ -590,33 +587,7 @@ async function initializeWorkspace(user) {
   } catch (error) { showToast(error.message, true); }
 }
 
-authForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  authError.textContent = '';
-  authSubmit.disabled = true;
-  authSubmit.textContent = authMode === 'register' ? 'Creating account…' : 'Signing in…';
-  try {
-    const endpoint = authMode === 'register' ? '/api/register' : '/api/login';
-    const data = await api(endpoint, { method: 'POST', body: JSON.stringify({ username: authUsername.value.trim(), password: authPassword.value }) });
-    await initializeWorkspace(data.user);
-  } catch (error) {
-    authError.textContent = error.message;
-  } finally {
-    authSubmit.disabled = false;
-    authSubmit.textContent = authMode === 'register' ? 'Create account' : 'Sign in';
-  }
-});
-
-authSwitch.addEventListener('click', () => setAuthMode(authMode === 'login' ? 'register' : 'login'));
-$('#new-chat').addEventListener('click', createConversation);
-$('#logout-button').addEventListener('click', async () => {
-  if (isSending) return showToast('Wait until the current response finishes before signing out.', true);
-  try { await api('/api/logout', { method: 'POST', body: JSON.stringify({}) }); } catch { /* show sign-in screen even if the session already expired */ }
-  currentUser = null; localOwnerKey = null; conversations = []; currentConversationId = null; messages = [];
-  clearSelectedFiles();
-  setAuthMode('login'); setAuthVisible(true); hideMobileSidebar();
-});
-fileInput.addEventListener('change', () => { addSelectedFiles(fileInput.files); fileInput.value = ''; });
+if (fileInput) fileInput.disabled = true;
 chatForm.addEventListener('submit', (event) => { event.preventDefault(); sendMessage(messageInput.value); });
 messageInput.addEventListener('input', updateComposer);
 messageInput.addEventListener('keydown', (event) => {
@@ -646,16 +617,22 @@ document.addEventListener('keydown', (event) => {
 (async function boot() {
   updateComposer();
   try {
-    const data = await api('/api/me');
-    await initializeWorkspace(data.user);
-  } catch {
-    const cachedUsername = localStorage.getItem('nemotron-last-local-user');
-    if (cachedUsername) {
-      await initializeWorkspace({ username: cachedUsername, offlineLocalOnly: true });
-      showToast('Offline mode: local history is available, but AI requests and sign-in require a connection.');
-    } else {
-      setAuthMode('login');
-      setAuthVisible(true);
-    }
+    await LocalChatDB.open();
+    const deviceKeyName = 'nemotron-device-local-key-v1';
+    let deviceKey = localStorage.getItem(deviceKeyName);
+    if (!deviceKey) { deviceKey = crypto.randomUUID(); localStorage.setItem(deviceKeyName, deviceKey); }
+    await initializeWorkspace({ username: 'Guest' });
+    localOwnerKey = `device:${deviceKey}`;
+    $('#sidebar-username').textContent = 'Guest';
+    $('#avatar').textContent = 'G';
+    await refreshConversations();
+    if (conversations.length) await openConversation(conversations[0].id);
+    else renderMessages();
+    const health = await api('/api/health').catch(() => null);
+    const modelLabel = document.querySelector('.model-status strong');
+    const modelSub = document.querySelector('.model-status small');
+    if (health && modelLabel && modelSub) { modelLabel.textContent = 'Nemotron Text'; modelSub.textContent = `${health.model} · Text only`; }
+  } catch (error) {
+    showToast(`Could not initialize local conversation cache: ${error.message}`, true);
   }
 })();

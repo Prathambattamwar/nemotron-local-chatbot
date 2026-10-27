@@ -1,109 +1,124 @@
-/* Device-only conversation storage. No conversation content is sent to the server except the context needed for the current AI request. */
+/* Device-only text conversation storage using the Cache API. Records expire after 5 days. */
 'use strict';
 window.LocalChatDB = (() => {
-  const DB_NAME = 'nemotron-device-chat';
-  const DB_VERSION = 1;
-  let dbPromise;
-  function open() {
-    if (dbPromise) return dbPromise;
-    dbPromise = new Promise((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, DB_VERSION);
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains('conversations')) {
-          const store = db.createObjectStore('conversations', { keyPath: 'id' });
-          store.createIndex('ownerKey', 'ownerKey', { unique: false });
-          store.createIndex('updated_at', 'updated_at', { unique: false });
-        }
-        if (!db.objectStoreNames.contains('messages')) {
-          const store = db.createObjectStore('messages', { keyPath: 'id' });
-          store.createIndex('ownerKey', 'ownerKey', { unique: false });
-          store.createIndex('conversationId', 'conversationId', { unique: false });
-          store.createIndex('created_at', 'created_at', { unique: false });
-        }
-        if (!db.objectStoreNames.contains('settings')) db.createObjectStore('settings', { keyPath: 'key' });
-      };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error || new Error('Could not open local conversation storage.'));
-      request.onblocked = () => reject(new Error('Close other Nemotron tabs to upgrade local storage.'));
-    });
-    return dbPromise;
+  const CACHE_NAME = 'nemotron-chat-data-v1';
+  const RETENTION_MS = 5 * 24 * 60 * 60 * 1000;
+  const ROOT = new URL('/__nemotron_local_data__/', location.origin);
+  let cachePromise;
+  let lock = Promise.resolve();
+
+  function urlFor(kind, ownerKey, id = '') {
+    const url = new URL(encodeURIComponent(ownerKey) + '/' + (id ? encodeURIComponent(id) : '_index'), ROOT);
+    url.searchParams.set('kind', kind);
+    return url.href;
   }
-  async function run(storeName, mode, operation) {
-    const db = await open();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(storeName, mode);
-      const store = tx.objectStore(storeName);
-      let result;
-      try { result = operation(store); } catch (e) { reject(e); return; }
-      tx.oncomplete = () => resolve(result?.result);
-      tx.onerror = () => reject(tx.error || result?.error || new Error('Local database operation failed.'));
-      tx.onabort = () => reject(tx.error || new Error('Local database transaction was aborted.'));
-    });
+  function requestFor(kind, ownerKey, id = '') { return new Request(urlFor(kind, ownerKey, id)); }
+  async function cache() {
+    if (!('caches' in window)) throw new Error('This browser does not support Cache Storage. Open the PWA in a supported browser on HTTPS or localhost.');
+    if (!cachePromise) cachePromise = caches.open(CACHE_NAME);
+    return cachePromise;
   }
-  async function get(storeName, key) {
-    const db = await open();
-    return new Promise((resolve, reject) => {
-      const req = db.transaction(storeName, 'readonly').objectStore(storeName).get(key);
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = () => reject(req.error);
-    });
+  async function read(req) {
+    const response = await (await cache()).match(req);
+    if (!response) return null;
+    try { return await response.json(); } catch { return null; }
   }
-  async function getAllByIndex(storeName, indexName, value) {
-    const db = await open();
-    return new Promise((resolve, reject) => {
-      const req = db.transaction(storeName, 'readonly').objectStore(storeName).index(indexName).getAll(value);
-      req.onsuccess = () => resolve(req.result || []);
-      req.onerror = () => reject(req.error);
-    });
+  async function write(req, value) {
+    const response = new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+    await (await cache()).put(req, response);
   }
-  async function put(storeName, value) { return run(storeName, 'readwrite', store => store.put(value)); }
+  async function remove(req) { await (await cache()).delete(req); }
+  function serialized(fn) {
+    const result = lock.then(fn, fn);
+    lock = result.catch(() => {});
+    return result;
+  }
+  function recordTime(record) {
+    const value = Number(record?.updated_at || record?.created_at || record?.timestamp || 0);
+    return value > 0 && value < 1e12 ? value * 1000 : value;
+  }
+  async function entries(kind, ownerKey) {
+    const c = await cache();
+    const requests = await c.keys();
+    const prefix = new URL(encodeURIComponent(ownerKey) + '/', ROOT).pathname;
+    const out = [];
+    for (const req of requests) {
+      const u = new URL(req.url);
+      if (!u.pathname.startsWith(prefix) || u.searchParams.get('kind') !== kind) continue;
+      const value = await read(req);
+      if (value) out.push({ req, value });
+    }
+    return out;
+  }
+  async function purgeExpired(ownerKey) {
+    const cutoff = Date.now() - RETENTION_MS;
+    const convs = await entries('conversation', ownerKey);
+    const messages = await entries('message', ownerKey);
+    const expiredIds = new Set();
+    for (const { req, value } of convs) {
+      if (!recordTime(value) || recordTime(value) < cutoff) {
+        expiredIds.add(value.id);
+        await remove(req);
+      }
+    }
+    for (const { req, value } of messages) {
+      if (expiredIds.has(value.conversationId) || !recordTime(value) || recordTime(value) < cutoff) await remove(req);
+    }
+  }
+  async function open() { await cache(); return true; }
   async function listConversations(ownerKey) {
-    return (await getAllByIndex('conversations', 'ownerKey', ownerKey)).sort((a,b) => b.updated_at - a.updated_at);
+    await purgeExpired(ownerKey);
+    return (await entries('conversation', ownerKey)).map(x => x.value).sort((a,b) => b.updated_at - a.updated_at);
   }
   async function getConversation(ownerKey, id) {
-    const value = await get('conversations', id);
+    await purgeExpired(ownerKey);
+    const value = await read(requestFor('conversation', ownerKey, id));
     return value?.ownerKey === ownerKey ? value : null;
   }
   async function createConversation(ownerKey) {
-    const now = Math.floor(Date.now()/1000);
-    const conversation = { id: crypto.randomUUID(), ownerKey, title: 'New chat', created_at: now, updated_at: now };
-    await put('conversations', conversation);
-    return conversation;
+    return serialized(async () => {
+      await purgeExpired(ownerKey);
+      const now = Math.floor(Date.now() / 1000);
+      const value = { id: crypto.randomUUID(), ownerKey, title: 'New chat', created_at: now, updated_at: now };
+      await write(requestFor('conversation', ownerKey, value.id), value);
+      return value;
+    });
   }
   async function putConversation(ownerKey, value) {
-    if (value.ownerKey && value.ownerKey !== ownerKey) throw new Error('Conversation owner mismatch.');
-    value.ownerKey = ownerKey;
-    value.updated_at = Math.floor(Date.now()/1000);
-    await put('conversations', value);
+    return serialized(async () => {
+      if (value.ownerKey && value.ownerKey !== ownerKey) throw new Error('Conversation owner mismatch.');
+      const now = Math.floor(Date.now() / 1000);
+      const record = { ...value, ownerKey, updated_at: now };
+      await write(requestFor('conversation', ownerKey, record.id), record);
+      return record;
+    });
   }
   async function touchConversation(ownerKey, id) {
     const c = await getConversation(ownerKey, id);
     if (c) await putConversation(ownerKey, c);
   }
   async function putMessage(ownerKey, conversationId, message) {
-    const record = { ...message, ownerKey, conversationId, order: message.order || Date.now() };
-    await put('messages', record);
-  }
-  async function listMessages(ownerKey, conversationId) {
-    return (await getAllByIndex('messages', 'conversationId', conversationId))
-      .filter(m => m.ownerKey === ownerKey)
-      .sort((a,b) => (a.order || a.created_at) - (b.order || b.created_at));
-  }
-  async function getSetting(key) { return get('settings', key); }
-  async function putSetting(key, value) { return put('settings', { key, value }); }
-  async function deleteConversation(ownerKey, id) {
-    const c = await getConversation(ownerKey, id);
-    if (!c) return;
-    const messages = await listMessages(ownerKey, id);
-    const db = await open();
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(['conversations','messages'], 'readwrite');
-      tx.objectStore('conversations').delete(id);
-      for (const m of messages) tx.objectStore('messages').delete(m.id);
-      tx.oncomplete = resolve;
-      tx.onerror = () => reject(tx.error);
+    return serialized(async () => {
+      const record = { ...message, attachments: [], ownerKey, conversationId, order: message.order || Date.now(), created_at: message.created_at || Math.floor(Date.now()/1000) };
+      await write(requestFor('message', ownerKey, record.id), record);
+      // Enforce the five-day rule immediately as well as during reads.
+      await purgeExpired(ownerKey);
+      return record;
     });
   }
-  return { open, listConversations, getConversation, createConversation, putConversation, touchConversation, putMessage, listMessages, deleteConversation, getSetting, putSetting };
+  async function listMessages(ownerKey, conversationId) {
+    await purgeExpired(ownerKey);
+    return (await entries('message', ownerKey)).map(x => x.value).filter(m => m.ownerKey === ownerKey && m.conversationId === conversationId).sort((a,b) => (a.order || a.created_at) - (b.order || b.created_at));
+  }
+  async function getSetting(key) { return read(requestFor('setting', 'global', key)); }
+  async function putSetting(key, value) { await write(requestFor('setting', 'global', key), { key, value, updated_at: Date.now() }); }
+  async function deleteConversation(ownerKey, id) {
+    const c = await cache();
+    const convReq = requestFor('conversation', ownerKey, id);
+    await remove(convReq);
+    const all = await entries('message', ownerKey);
+    for (const item of all) if (item.value.conversationId === id) await remove(item.req);
+  }
+  async function getRetentionInfo() { return { retentionDays: 5, storage: 'Cache API', warning: 'Browser data can still be cleared by the user or browser.' }; }
+  return { open, listConversations, getConversation, createConversation, putConversation, touchConversation, putMessage, listMessages, deleteConversation, getSetting, putSetting, getRetentionInfo };
 })();
