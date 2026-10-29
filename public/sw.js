@@ -1,6 +1,5 @@
-const SHELL_CACHE = 'nemotron-shell-v3';
-const CHAT_CACHE_PREFIX = 'nemotron-chat-data-';
-const SHELL = ['/', '/styles.css', '/app.js', '/db.js', '/manifest.webmanifest'];
+const SHELL_CACHE = 'nemotron-shell-v9';
+const SHELL = ['/', '/styles.css', '/app.js', '/config.js', '/db.js', '/manifest.webmanifest'];
 self.addEventListener('install', event => event.waitUntil(caches.open(SHELL_CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting())));
 self.addEventListener('activate', event => event.waitUntil(caches.keys().then(keys => Promise.all(
   // Only retire old application-shell caches. Never delete the user's conversation cache.

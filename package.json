@@ -1,8 +1,8 @@
 {
-  "name": "nemotron-pwa-cache-text-only",
-  "version": "3.0.0",
+  "name": "nemotron-pwa-voicestudio-text-only",
+  "version": "3.4.0",
   "private": true,
-  "description": "Text-only Nemotron PWA with device Cache API storage and five-day retention",
+  "description": "Text-only Nemotron PWA with device Cache API storage, five-day retention, and local OmniVoice TTS bridge",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

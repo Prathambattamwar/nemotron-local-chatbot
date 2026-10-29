@@ -1,43 +1,28 @@
 'use strict';
 
 const $ = (selector) => document.querySelector(selector);
-const authScreen = $('#auth-screen');
 const appShell = $('#app');
-const authForm = $('#auth-form');
-const authUsername = $('#auth-username');
-const authPassword = $('#auth-password');
-const authTitle = $('#auth-title');
-const authSubmit = $('#auth-submit');
-const authError = $('#auth-error');
-const authSwitch = $('#auth-switch');
-const authSwitchCopy = $('#auth-switch-copy');
 const conversationList = $('#conversation-list');
 const messageList = $('#message-list');
 const welcome = $('#welcome');
 const chatForm = $('#chat-form');
 const messageInput = $('#message-input');
 const sendButton = $('#send-button');
-const fileInput = $('#file-input');
-const selectedAttachments = $('#selected-attachments');
 const characterCount = $('#character-count');
 const chatScroll = $('#chat-scroll');
 const toast = $('#toast');
 const sidebar = $('#sidebar');
 const mobileScrim = $('#mobile-scrim');
+const VOICE_BRIDGE_URL = String(window.NEMOTRON_VOICE_BRIDGE_URL || 'http://127.0.0.1:3905').replace(/\/+$/, '');
+const currentUser = { username: 'Guest' };
 
-let authMode = 'login';
-let currentUser = null;
 let conversations = [];
 let currentConversationId = null;
 let messages = [];
 let isSending = false;
-let selectedFiles = [];
 let toastTimer = null;
 let localOwnerKey = null;
 const activeObjectUrls = new Set();
-const MAX_FILES = 5;
-const MAX_FILE_BYTES = 20 * 1024 * 1024;
-const MAX_TOTAL_FILE_BYTES = 40 * 1024 * 1024;
 
 async function api(url, options = {}) {
   const isMultipart = typeof FormData !== 'undefined' && options.body instanceof FormData;
@@ -61,27 +46,6 @@ function showToast(message, isError = false) {
   toast.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove('show'), 3600);
-}
-
-function setAuthVisible(visible) {
-  authScreen.classList.toggle('hidden', !visible);
-  appShell.classList.toggle('hidden', visible);
-  if (visible) {
-    authPassword.value = '';
-    authError.textContent = '';
-    setTimeout(() => authUsername.focus(), 30);
-  }
-}
-
-function setAuthMode(mode) {
-  authMode = mode;
-  const registering = mode === 'register';
-  authTitle.textContent = registering ? 'Create your private space.' : 'Your own AI workspace.';
-  authSubmit.textContent = registering ? 'Create account' : 'Sign in';
-  authSwitchCopy.textContent = registering ? 'Already have an account?' : 'New here?';
-  authSwitch.textContent = registering ? 'Sign in' : 'Create an account';
-  authPassword.autocomplete = registering ? 'new-password' : 'current-password';
-  authError.textContent = '';
 }
 
 function escapeHtml(value) {
@@ -144,160 +108,6 @@ function renderMarkdown(source) {
   let html = output.join('');
   html = html.replace(/\u0000BLOCK(\d+)\u0000/g, (_match, index) => codeBlocks[Number(index)] || '');
   return html;
-}
-
-function formatBytes(bytes) {
-  const value = Number(bytes || 0);
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
-
-function attachmentElement(attachment) {
-  let url = attachment.url || attachment.preview_url;
-  if (!url && attachment.blob instanceof Blob) { url = URL.createObjectURL(attachment.blob); activeObjectUrls.add(url); }
-  const type = attachment.data_type || (
-    String(attachment.mime_type || attachment.type || '').startsWith('image/') ? 'image' :
-    String(attachment.mime_type || attachment.type || '').startsWith('audio/') ? 'audio' :
-    String(attachment.mime_type || attachment.type || '').startsWith('video/') ? 'video' : 'file'
-  );
-  const name = attachment.original_name || attachment.name || 'Attachment';
-  const wrap = document.createElement('div');
-  wrap.className = `message-attachment attachment-${type}`;
-
-  if (type === 'image' && url) {
-    const link = document.createElement('a');
-    link.className = 'image-attachment-link';
-    link.href = url;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    const img = document.createElement('img');
-    img.src = url;
-    img.alt = name;
-    img.loading = 'lazy';
-    link.appendChild(img);
-    wrap.appendChild(link);
-    const caption = document.createElement('div');
-    caption.className = 'attachment-caption';
-    caption.textContent = `${name} · ${formatBytes(attachment.size_bytes ?? attachment.size)}`;
-    wrap.appendChild(caption);
-    return wrap;
-  }
-
-  if ((type === 'video' || type === 'audio') && url) {
-    const media = document.createElement(type);
-    media.controls = true;
-    media.preload = 'metadata';
-    media.src = url;
-    if (type === 'video') media.playsInline = true;
-    wrap.appendChild(media);
-    const caption = document.createElement('div');
-    caption.className = 'attachment-caption';
-    caption.textContent = `${name} · ${formatBytes(attachment.size_bytes ?? attachment.size)}`;
-    wrap.appendChild(caption);
-    return wrap;
-  }
-
-  const link = document.createElement('a');
-  link.className = 'attachment-file-card';
-  if (url) link.href = url;
-  link.target = '_blank';
-  link.rel = 'noopener noreferrer';
-  link.title = name;
-  const icon = document.createElement('span');
-  icon.className = 'attachment-file-icon';
-  icon.textContent = type === 'document' ? 'DOC' : type === 'data' ? 'DATA' : type === 'archive' ? 'ZIP' : type.toUpperCase().slice(0, 4);
-  const details = document.createElement('span');
-  details.className = 'attachment-file-details';
-  const title = document.createElement('strong');
-  title.textContent = name;
-  const meta = document.createElement('small');
-  const parseStatus = attachment.parsed ? ' · content parsed' : '';
-  meta.textContent = `${attachment.mime_type || 'Unknown type'} · ${formatBytes(attachment.size_bytes ?? attachment.size)}${parseStatus}`;
-  details.append(title, meta);
-  if (attachment.processing_note) {
-    const note = document.createElement('small');
-    note.className = 'attachment-processing-note';
-    note.textContent = attachment.processing_note;
-    details.appendChild(note);
-  }
-  const arrow = document.createElement('span');
-  arrow.className = 'attachment-download';
-  arrow.textContent = '↗';
-  link.append(icon, details, arrow);
-  wrap.appendChild(link);
-  return wrap;
-}
-
-function renderMessageAttachments(attachments) {
-  if (!Array.isArray(attachments) || !attachments.length) return null;
-  const list = document.createElement('div');
-  list.className = 'message-attachments';
-  for (const attachment of attachments) list.appendChild(attachmentElement(attachment));
-  return list;
-}
-
-function renderSelectedFiles() {
-  selectedAttachments.replaceChildren();
-  selectedAttachments.classList.toggle('hidden', selectedFiles.length === 0);
-  for (let index = 0; index < selectedFiles.length; index += 1) {
-    const item = selectedFiles[index];
-    const chip = document.createElement('div');
-    chip.className = 'selected-file-chip';
-    const label = document.createElement('span');
-    label.className = 'selected-file-name';
-    label.textContent = `${item.file.name} · ${formatBytes(item.file.size)}`;
-    const remove = document.createElement('button');
-    remove.type = 'button';
-    remove.className = 'remove-selected-file';
-    remove.textContent = '×';
-    remove.setAttribute('aria-label', `Remove ${item.file.name}`);
-    remove.addEventListener('click', () => {
-      URL.revokeObjectURL(item.previewUrl);
-      selectedFiles = selectedFiles.filter((entry) => entry !== item);
-      renderSelectedFiles();
-      updateComposer();
-    });
-    chip.append(label, remove);
-    selectedAttachments.appendChild(chip);
-  }
-}
-
-function clearSelectedFiles() {
-  for (const item of selectedFiles) URL.revokeObjectURL(item.previewUrl);
-  selectedFiles = [];
-  if (fileInput) fileInput.value = '';
-  renderSelectedFiles();
-  updateComposer();
-}
-
-function addSelectedFiles(fileList) {
-  const incoming = Array.from(fileList || []);
-  const additions = [];
-  let totalBytes = selectedFiles.reduce((sum, item) => sum + item.file.size, 0);
-  for (const file of incoming) {
-    if (selectedFiles.length + additions.length >= MAX_FILES) {
-      showToast(`Attach no more than ${MAX_FILES} files per message.`, true);
-      break;
-    }
-    if (file.size > MAX_FILE_BYTES) {
-      showToast(`${file.name} is larger than 20 MB and was not added.`, true);
-      continue;
-    }
-    if (totalBytes + file.size > MAX_TOTAL_FILE_BYTES) {
-      showToast('Attachments must total 40 MB or less per message.', true);
-      continue;
-    }
-    const duplicate = [...selectedFiles, ...additions].some((item) => item.file.name === file.name && item.file.size === file.size && item.file.lastModified === file.lastModified);
-    if (duplicate) continue;
-    totalBytes += file.size;
-    additions.push({ file, previewUrl: URL.createObjectURL(file) });
-  }
-  selectedFiles.push(...additions);
-  renderSelectedFiles();
-  updateComposer();
-  if (additions.length) showToast(`${additions.length} file${additions.length === 1 ? '' : 's'} ready to save locally.`);
 }
 
 function formatTime(seconds) {
@@ -367,6 +177,128 @@ function renderConversationList() {
   }
 }
 
+function cleanTextForSpeech(value) {
+  return String(value || '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/^\s*(?:[-*+] |\d+\.\s+)/gm, '')
+    .replace(/(\*\*|__)(.*?)\1/g, '$2')
+    .replace(/[ *_~`]/g, ' ')
+    .replace(/\\\[/g, '').replace(/\\\]/g, '')
+    .replace(/\\\(/g, '').replace(/\\\)/g, '')
+    .replace(/\\\n/g, '\n')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function splitTextForSpeech(value, maxChars = 240) {
+  let remaining = cleanTextForSpeech(value);
+  const chunks = [];
+  while (remaining.length) {
+    if (remaining.length <= maxChars) { chunks.push(remaining); break; }
+    const window = remaining.slice(0, maxChars + 1);
+    const minCut = Math.floor(maxChars * 0.55);
+    let cut = -1;
+    // Prefer a sentence or paragraph boundary so speech sounds less chopped up.
+    for (const separator of ['. ', '! ', '? ', ': ', '; ', '\n\n', '\n', ', ']) {
+      const candidate = window.lastIndexOf(separator);
+      if (candidate >= minCut && candidate > cut) cut = candidate + (separator === '\n\n' ? 2 : separator === '\n' ? 1 : separator.length - 1);
+    }
+    if (cut < minCut) cut = window.lastIndexOf(' ');
+    if (cut < 1) cut = maxChars;
+    chunks.push(remaining.slice(0, cut).trim());
+    remaining = remaining.slice(cut).trim();
+  }
+  return chunks.filter(Boolean);
+}
+
+async function requestVoiceStudioSpeech(input) {
+  let response;
+  try { response = await fetch(`${VOICE_BRIDGE_URL}/api/tts/speech`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    cache: 'no-store',
+    body: JSON.stringify({ input }),
+    signal: AbortSignal.timeout(600000)
+  }); } catch {
+    throw new Error('Cannot reach VoiceStudio on this PC. Start VoiceStudio and run voice-bridge/start-bridge.bat. For a hosted PWA, allow local-network access in the browser and add its origin to voice-bridge/.env.');
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error || `VoiceStudio request failed (${response.status}).`);
+  }
+  const blob = await response.blob();
+  if (!blob.size) throw new Error('VoiceStudio returned an empty audio file.');
+  return blob;
+}
+
+async function refreshVoiceStudioStatus() {
+  const chip = $('#tts-status');
+  if (!chip) return;
+  chip.dataset.state = 'checking';
+  chip.textContent = 'VoiceStudio · checking';
+  try {
+    const response = await fetch(`${VOICE_BRIDGE_URL}/health`, { cache: 'no-store', signal: AbortSignal.timeout(6500) });
+    const status = await response.json().catch(() => ({}));
+    if (!response.ok || !status.ok) throw new Error(status.error || 'VoiceStudio offline');
+    const testButton = $('#tts-test-button');
+    if (status.engineAvailable === false) {
+      chip.dataset.state = 'offline';
+      chip.textContent = 'OmniVoice · unavailable';
+      chip.title = status.engineReason || 'OmniVoice is not currently available in VoiceStudio Settings → Models → TTS.';
+      if (testButton) testButton.disabled = true;
+      return;
+    }
+    chip.dataset.state = status.openApiChecked && !status.speechRouteAdvertised ? 'warning' : 'online';
+    chip.textContent = status.openApiChecked && !status.speechRouteAdvertised
+      ? 'VoiceStudio · API mismatch'
+      : (status.engineAvailable ? 'OmniVoice · available' : 'VoiceStudio · online');
+    chip.title = `VoiceStudio ${status.version ? `v${status.version}` : ''} · explicit OmniVoice engine (${status.voice || 'voice profile'}). Availability means the engine is installed; first CPU synthesis may take longer. ${status.openApiChecked ? `OpenAPI advertises POST /v1/audio/speech: ${status.speechRouteAdvertised ? 'yes' : 'no'}.` : 'OpenAPI route could not be inspected.'}`;
+    if (testButton) testButton.disabled = false;
+  } catch {
+    chip.dataset.state = 'offline';
+    chip.textContent = 'VoiceStudio · offline';
+    chip.title = 'Start VoiceStudio, then run voice-bridge/start-bridge.bat on this Windows PC.';
+    const testButton = $('#tts-test-button');
+    if (testButton) testButton.disabled = true;
+  }
+}
+
+async function testVoiceStudioInApp() {
+  const button = $('#tts-test-button');
+  if (!button || button.disabled) return;
+  const oldLabel = button.textContent;
+  let audioUrl = '';
+  let audio = null;
+  button.disabled = true;
+  button.textContent = 'Generating…';
+  try {
+    const blob = await requestVoiceStudioSpeech('Hello! This is a short OmniVoice voice test.');
+    audioUrl = URL.createObjectURL(blob);
+    audio = new Audio(audioUrl);
+    audio.addEventListener('ended', () => {
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+      button.disabled = false;
+      button.textContent = oldLabel;
+    }, { once: true });
+    audio.addEventListener('error', () => {
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+      button.disabled = false;
+      button.textContent = oldLabel;
+      showToast('VoiceStudio returned audio, but the browser could not play it.', true);
+    }, { once: true });
+    button.textContent = 'Playing…';
+    await audio.play();
+  } catch (error) {
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    button.disabled = false;
+    button.textContent = oldLabel;
+    showToast(error.message || 'OmniVoice test failed.', true);
+  }
+}
+
 function renderMessages(typing = false) {
   for (const url of activeObjectUrls) URL.revokeObjectURL(url);
   activeObjectUrls.clear();
@@ -394,8 +326,6 @@ function renderMessages(typing = false) {
     content.className = 'message-content';
     content.innerHTML = renderMarkdown(message.content);
     body.append(meta, content);
-    const attachmentList = renderMessageAttachments(message.attachments);
-    if (attachmentList) body.appendChild(attachmentList);
     if (message.role === 'assistant' && !message.pending) {
       const actions = document.createElement('div');
       actions.className = 'message-actions';
@@ -405,7 +335,139 @@ function renderMessages(typing = false) {
         try { await navigator.clipboard.writeText(message.content); showToast('Answer copied.'); }
         catch { showToast('Clipboard access is unavailable in this browser.', true); }
       });
-      actions.append(copy); body.append(actions);
+      const speak = document.createElement('button');
+      speak.type = 'button'; speak.className = 'mini-action'; speak.textContent = '▶ Read aloud';
+      speak.title = 'Generate speech using VoiceStudio on this Windows PC';
+      const speechSlot = document.createElement('div');
+      speechSlot.className = 'speech-slot';
+      speak.addEventListener('click', async () => {
+        const oldUrls = speechSlot._speechUrls || [];
+        for (const url of oldUrls) { URL.revokeObjectURL(url); activeObjectUrls.delete(url); }
+        speechSlot._speechUrls = [];
+        speechSlot.replaceChildren();
+        const chunks = splitTextForSpeech(message.content, 240);
+        if (!chunks.length) return;
+
+        speak.disabled = true;
+        speak.textContent = 'Preparing first part…';
+        const generatedUrls = [];
+        speechSlot._speechUrls = generatedUrls;
+        const readyUrls = new Array(chunks.length);
+        const waiters = new Map();
+        let producerError = null;
+        let currentPart = 0;
+        let player = null;
+        const status = document.createElement('div');
+        status.className = 'speech-status';
+        status.textContent = `Preparing audio 1/${chunks.length}…`;
+        speechSlot.appendChild(status);
+
+        const publishUrl = (index, url) => {
+          readyUrls[index] = url;
+          for (const waiter of waiters.get(index) || []) waiter.resolve(url);
+          waiters.delete(index);
+        };
+        const rejectWaiters = (error) => {
+          for (const callbacks of waiters.values()) {
+            for (const item of callbacks) item.reject(error);
+          }
+          waiters.clear();
+        };
+        const waitForUrl = (index) => {
+          if (readyUrls[index]) return Promise.resolve(readyUrls[index]);
+          if (producerError) return Promise.reject(producerError);
+          return new Promise((resolve, reject) => {
+            const callbacks = waiters.get(index) || [];
+            callbacks.push({ resolve, reject });
+            waiters.set(index, callbacks);
+          });
+        };
+        const addAudioBlob = (index, blob) => {
+          const url = URL.createObjectURL(blob);
+          activeObjectUrls.add(url);
+          generatedUrls.push(url);
+          publishUrl(index, url);
+          return url;
+        };
+
+        try {
+          // Generate only the first small segment before showing the player.
+          const firstBlob = await requestVoiceStudioSpeech(chunks[0]);
+          addAudioBlob(0, firstBlob);
+          player = document.createElement('audio');
+          player.className = 'tts-audio-player';
+          player.controls = true;
+          player.preload = 'metadata';
+          player.src = readyUrls[0];
+          speechSlot.appendChild(player);
+
+          const playPart = async (index) => {
+            if (index >= chunks.length) {
+              status.textContent = 'Speech finished.';
+              return;
+            }
+            try {
+              if (!readyUrls[index]) status.textContent = `Preparing section ${index + 1}/${chunks.length}…`;
+              const url = await waitForUrl(index);
+              currentPart = index;
+              player.src = url;
+              status.textContent = `Playing section ${index + 1}/${chunks.length}${producerError ? ' · remaining generation failed' : ''}`;
+              try { await player.play(); }
+              catch { showToast('Audio is ready. Press play on the audio player to continue.'); }
+            } catch (error) {
+              status.textContent = `Stopped at section ${index + 1}/${chunks.length}.`;
+              showToast(error.message || 'Could not prepare the next speech section.', true);
+            }
+          };
+          player.addEventListener('ended', () => { void playPart(currentPart + 1); });
+          status.textContent = chunks.length > 1
+            ? `First section ready; preparing ${chunks.length - 1} more in the background.`
+            : 'Audio ready.';
+          speak.textContent = '🔊 Playing / preparing…';
+          try { await player.play(); }
+          catch { showToast('First section is ready. Press play on the audio player; remaining sections are preparing.'); }
+
+          if (chunks.length === 1) {
+            speak.disabled = false;
+            speak.textContent = '↻ Read aloud again';
+            return;
+          }
+
+          // Generate the rest while the first segment is already playing.
+          // Playback automatically advances to each segment as soon as it is ready.
+          (async () => {
+            try {
+              for (let i = 1; i < chunks.length; i += 1) {
+                speak.textContent = `Preparing section ${i + 1}/${chunks.length}…`;
+                const blob = await requestVoiceStudioSpeech(chunks[i]);
+                addAudioBlob(i, blob);
+                if (i === 1 && currentPart === 0 && !player.paused && !player.ended) {
+                  status.textContent = `Playing section 1/${chunks.length} · next section ready`;
+                }
+              }
+              status.textContent = 'All sections ready. Playback continues in order.';
+              speak.textContent = '↻ Read aloud again';
+            } catch (error) {
+              producerError = error;
+              rejectWaiters(error);
+              status.textContent = `Speech generation stopped after section ${generatedUrls.length}/${chunks.length}.`;
+              showToast(error.message || 'VoiceStudio could not generate the remaining speech.', true);
+              speak.textContent = '↻ Try read aloud again';
+            } finally {
+              speak.disabled = false;
+            }
+          })();
+        } catch (error) {
+          for (const url of generatedUrls) { URL.revokeObjectURL(url); activeObjectUrls.delete(url); }
+          speechSlot._speechUrls = [];
+          speechSlot.replaceChildren();
+          showToast(error.message || 'VoiceStudio could not generate speech.', true);
+          speak.textContent = '▶ Try read aloud again';
+          speak.disabled = false;
+        }
+      });
+      actions.append(copy, speak);
+      body.append(actions, speechSlot);
     }
     row.append(avatar, body);
     messageList.appendChild(row);
@@ -430,7 +492,6 @@ async function openConversation(id) {
     return;
   }
   currentConversationId = id;
-  clearSelectedFiles();
   hideMobileSidebar();
   renderConversationList();
   try {
@@ -454,7 +515,6 @@ async function createConversation() {
   renderConversationList();
   hideMobileSidebar();
   messageInput.value = '';
-  clearSelectedFiles();
   updateComposer();
   messageInput.focus();
 }
@@ -469,21 +529,9 @@ async function sendMessage(rawText) {
     renderConversationList();
   }
   const targetConversationId = currentConversationId;
-  const filesToSend = []; // This build supports text-only AI conversations.
   const timestamp = Math.floor(Date.now() / 1000);
-  const pendingContent = text;
-  const userMessage = {
-    id: crypto.randomUUID(), role: 'user', content: pendingContent, created_at: timestamp, pending: true,
-    attachments: filesToSend.map(({ file }) => ({
-      id: crypto.randomUUID(), original_name: file.name, name: file.name,
-      mime_type: file.type || 'application/octet-stream',
-      data_type: file.type.startsWith('image/') ? 'image' : file.type.startsWith('audio/') ? 'audio' : file.type.startsWith('video/') ? 'video' : 'file',
-      size_bytes: file.size, blob: file, parsed: false
-    }))
-  };
+  const userMessage = { id: crypto.randomUUID(), role: 'user', content: text, created_at: timestamp, pending: true };
   messageInput.value = '';
-  selectedFiles = [];
-  renderSelectedFiles();
   updateComposer();
   isSending = true;
   sendButton.disabled = true;
@@ -491,7 +539,7 @@ async function sendMessage(rawText) {
   await LocalChatDB.putMessage(localOwnerKey, targetConversationId, userMessage);
   const conv = await LocalChatDB.getConversation(localOwnerKey, targetConversationId);
   if (conv && conv.title === 'New chat') {
-    conv.title = (text || filesToSend[0]?.file.name || 'Uploaded files').replace(/\s+/g, ' ').slice(0, 56);
+    conv.title = text.replace(/\s+/g, ' ').slice(0, 56);
     await LocalChatDB.putConversation(localOwnerKey, conv);
   }
   renderMessages(true);
@@ -507,7 +555,7 @@ async function sendMessage(rawText) {
       showToast(data.notice || 'AI service is temporarily busy. Your message remains saved on this device.', true);
     } else {
       await LocalChatDB.putMessage(localOwnerKey, targetConversationId, userMessage);
-      const assistantMessage = { id: crypto.randomUUID(), role: 'assistant', content: data.message.content, created_at: data.message.created_at || Math.floor(Date.now() / 1000), attachments: [] };
+      const assistantMessage = { id: crypto.randomUUID(), role: 'assistant', content: data.message.content, created_at: data.message.created_at || Math.floor(Date.now() / 1000) };
       await LocalChatDB.putMessage(localOwnerKey, targetConversationId, assistantMessage);
       if (targetConversationId === currentConversationId) messages.push(assistantMessage);
     }
@@ -524,7 +572,6 @@ async function sendMessage(rawText) {
     if (targetConversationId === currentConversationId) renderMessages();
     showToast(`${error.message} Your message is still saved on this device.`, true);
   } finally {
-    for (const item of filesToSend) URL.revokeObjectURL(item.previewUrl);
     isSending = false;
     updateComposer();
     messageInput.focus();
@@ -539,55 +586,6 @@ function updateComposer() {
   sendButton.disabled = isSending || !messageInput.value.trim();
 }
 
-async function migrateLegacyHistoryOnce() {
-  const marker = await LocalChatDB.getSetting(`legacy-import:${localOwnerKey}`);
-  if (marker?.value) return;
-  try {
-    const response = await api('/api/conversations');
-    for (const conversation of (response.conversations || [])) {
-      const existing = await LocalChatDB.getConversation(localOwnerKey, conversation.id);
-      if (!existing) await LocalChatDB.putConversation(localOwnerKey, { ...conversation, ownerKey: localOwnerKey });
-      const history = await api(`/api/conversations/${encodeURIComponent(conversation.id)}/messages`);
-      for (const source of (history.messages || [])) {
-        const attachments = [];
-        for (const attachment of (source.attachments || [])) {
-          let blob = null;
-          try { const fileResponse = await fetch(attachment.url, { credentials: 'same-origin' }); if (fileResponse.ok) blob = await fileResponse.blob(); } catch { /* keep metadata if file retrieval fails */ }
-          attachments.push({ ...attachment, blob: blob || undefined, url: undefined, preview_url: undefined });
-        }
-        const localMessage = { ...source, attachments, pending: false };
-        await LocalChatDB.putMessage(localOwnerKey, conversation.id, localMessage);
-      }
-    }
-    await LocalChatDB.putSetting(`legacy-import:${localOwnerKey}`, { completedAt: Date.now() });
-    showToast('Existing server history was imported to this device. Verify it before removing old server records.');
-  } catch (error) {
-    // Old server history may be unavailable. Local history remains usable.
-    console.info('Legacy history import skipped:', error.message);
-  }
-}
-
-async function initializeWorkspace(user) {
-  currentUser = user;
-  localOwnerKey = localStorage.getItem('nemotron-device-local-key-v1') ? `device:${localStorage.getItem('nemotron-device-local-key-v1')}` : 'device:guest';
-  await LocalChatDB.open();
-  await LocalChatDB.getRetentionInfo();
-  localStorage.setItem('nemotron-last-local-user', String(user.username || 'user'));
-  $('#sidebar-username').textContent = user.username;
-  $('#avatar').textContent = user.username.slice(0, 1).toUpperCase();
-  if (authScreen) authScreen.classList.add('hidden');
-  appShell.classList.remove('hidden');
-  messages = [];
-  currentConversationId = null;
-  setCurrentTitle('New conversation');
-  renderMessages();
-  try {
-    await refreshConversations();
-    if (conversations.length) await openConversation(conversations[0].id);
-  } catch (error) { showToast(error.message, true); }
-}
-
-if (fileInput) fileInput.disabled = true;
 chatForm.addEventListener('submit', (event) => { event.preventDefault(); sendMessage(messageInput.value); });
 messageInput.addEventListener('input', updateComposer);
 messageInput.addEventListener('keydown', (event) => {
@@ -620,18 +618,29 @@ document.addEventListener('keydown', (event) => {
     await LocalChatDB.open();
     const deviceKeyName = 'nemotron-device-local-key-v1';
     let deviceKey = localStorage.getItem(deviceKeyName);
-    if (!deviceKey) { deviceKey = crypto.randomUUID(); localStorage.setItem(deviceKeyName, deviceKey); }
-    await initializeWorkspace({ username: 'Guest' });
+    if (!deviceKey) {
+      deviceKey = crypto.randomUUID();
+      localStorage.setItem(deviceKeyName, deviceKey);
+    }
     localOwnerKey = `device:${deviceKey}`;
     $('#sidebar-username').textContent = 'Guest';
     $('#avatar').textContent = 'G';
+    appShell.classList.remove('hidden');
     await refreshConversations();
     if (conversations.length) await openConversation(conversations[0].id);
     else renderMessages();
+
     const health = await api('/api/health').catch(() => null);
     const modelLabel = document.querySelector('.model-status strong');
     const modelSub = document.querySelector('.model-status small');
-    if (health && modelLabel && modelSub) { modelLabel.textContent = 'Nemotron Text'; modelSub.textContent = `${health.model} · Text only`; }
+    if (health && modelLabel && modelSub) {
+      modelLabel.textContent = 'Nemotron Text';
+      modelSub.textContent = `${health.model} · Text only`;
+    }
+    await refreshVoiceStudioStatus();
+    $('#tts-test-button')?.addEventListener('click', testVoiceStudioInApp);
+    window.addEventListener('focus', refreshVoiceStudioStatus);
+    window.setInterval(() => { if (document.visibilityState === 'visible') refreshVoiceStudioStatus(); }, 30000);
   } catch (error) {
     showToast(`Could not initialize local conversation cache: ${error.message}`, true);
   }

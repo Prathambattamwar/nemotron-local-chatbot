@@ -1,0 +1,8 @@
+{
+  "name": "nemotron-voicestudio-local-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Loopback-only bridge from a PWA to the local VoiceStudio desktop TTS API",
+  "scripts": { "start": "node bridge.js" },
+  "engines": { "node": ">=20.0.0" }
+}

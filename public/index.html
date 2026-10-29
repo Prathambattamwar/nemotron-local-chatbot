@@ -34,7 +34,7 @@
       <header class="topbar">
         <button id="sidebar-open" class="icon-button mobile-only" type="button" aria-label="Open sidebar">☰</button>
         <div class="topbar-left"><span class="topbar-label">WORKSPACE</span><span class="topbar-separator">/</span><span id="current-title" class="current-title">New conversation</span></div>
-        <div class="topbar-right"><span class="privacy-pill"><span class="privacy-icon">◈</span> Local history</span><span class="topbar-divider"></span><span class="model-chip">NVIDIA <b>●</b></span></div>
+        <div class="topbar-right"><span class="privacy-pill"><span class="privacy-icon">◈</span> Local history</span><span class="topbar-divider"></span><span class="model-chip">NVIDIA <b>●</b></span><span id="tts-status" class="tts-chip" data-state="checking" title="Checking local VoiceStudio">VoiceStudio · checking</span><button id="tts-test-button" class="tts-test-button" type="button" title="Generate and play a short OmniVoice sample">Test voice</button></div>
       </header>
 
       <section id="chat-scroll" class="chat-scroll">
@@ -56,7 +56,6 @@
 
       <footer class="composer-area">
         <form id="chat-form" class="composer">
-          <div id="selected-attachments" class="selected-attachments hidden" aria-live="polite"></div>
           <textarea id="message-input" rows="1" maxlength="16000" placeholder="Message Nemotron…" aria-label="Your message"></textarea>
           <div class="composer-bottom"><span class="composer-hint"><kbd>Enter</kbd> to send <span class="hint-divider">·</span> <kbd>Shift + Enter</kbd> for new line</span><div class="composer-actions"><span class="text-only-label" aria-label="Text-only chat">Text only</span><span id="character-count" class="character-count">0 / 16,000</span><button id="send-button" class="send-button" type="submit" aria-label="Send message" title="Send message"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" /></svg></button></div></div>
         </form>
@@ -67,6 +66,7 @@
     <div id="toast" class="toast" role="status"></div>
   </div>
   <script>if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));</script>
+  <script src="/config.js" defer></script>
   <script src="/db.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
